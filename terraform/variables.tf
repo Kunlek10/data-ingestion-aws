@@ -52,6 +52,12 @@ variable "lambda_layer_dir" {
   default     = "../layer"
 }
 
+variable "glue_script_path" {
+  description = "Path (relative to the terraform module) to the Glue gold-transform script."
+  type        = string
+  default     = "../glue/gold_transform.py"
+}
+
 variable "tags" {
   description = "Common tags applied to all resources."
   type        = map(string)

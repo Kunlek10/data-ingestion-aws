@@ -61,6 +61,38 @@ resource "aws_s3_bucket_public_access_block" "gdp_data" {
 }
 
 # ---------------------------------------------------------------------------
+# S3 bucket — gold layer, holds the Glue-transformed 2-year averages
+# ---------------------------------------------------------------------------
+resource "aws_s3_bucket" "gold_data" {
+  bucket = "${var.project_name}-${var.environment}-gold-${random_id.bucket_suffix.hex}"
+  tags   = var.tags
+}
+
+resource "aws_s3_bucket_versioning" "gold_data" {
+  bucket = aws_s3_bucket.gold_data.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "gold_data" {
+  bucket = aws_s3_bucket.gold_data.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "gold_data" {
+  bucket                  = aws_s3_bucket.gold_data.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# ---------------------------------------------------------------------------
 # IAM role + least-privilege policy for the Lambda function
 # ---------------------------------------------------------------------------
 data "aws_iam_policy_document" "lambda_assume_role" {
@@ -95,6 +127,12 @@ data "aws_iam_policy_document" "lambda_s3_write" {
     ]
     resources = ["arn:aws:logs:${var.aws_region}:*:log-group:/aws/lambda/${var.project_name}-${var.environment}-*"]
   }
+
+  statement {
+    sid       = "AllowStartGoldTransformJob"
+    actions   = ["glue:StartJobRun"]
+    resources = [aws_glue_job.gold_transform.arn]
+  }
 }
 
 resource "aws_iam_policy" "lambda_s3_write" {
@@ -105,6 +143,88 @@ resource "aws_iam_policy" "lambda_s3_write" {
 resource "aws_iam_role_policy_attachment" "lambda_s3_write" {
   role       = aws_iam_role.lambda_exec.name
   policy_arn = aws_iam_policy.lambda_s3_write.arn
+}
+
+# ---------------------------------------------------------------------------
+# Glue job — transforms the raw per-year CSV into 2-year gold averages
+# ---------------------------------------------------------------------------
+resource "aws_s3_object" "glue_script" {
+  bucket = aws_s3_bucket.gdp_data.id
+  key    = "scripts/gold_transform.py"
+  source = "${path.module}/${var.glue_script_path}"
+  etag   = filemd5("${path.module}/${var.glue_script_path}")
+}
+
+data "aws_iam_policy_document" "glue_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["glue.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "glue_exec" {
+  name               = "${var.project_name}-${var.environment}-glue-role"
+  assume_role_policy = data.aws_iam_policy_document.glue_assume_role.json
+  tags               = var.tags
+}
+
+data "aws_iam_policy_document" "glue_s3_access" {
+  statement {
+    sid       = "AllowReadRawAndScript"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.gdp_data.arn}/*"]
+  }
+
+  statement {
+    sid       = "AllowWriteGoldBucket"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.gold_data.arn}/*"]
+  }
+
+  statement {
+    sid = "AllowGlueLogging"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:*:log-group:/aws-glue/*"]
+  }
+}
+
+resource "aws_iam_policy" "glue_s3_access" {
+  name   = "${var.project_name}-${var.environment}-glue-policy"
+  policy = data.aws_iam_policy_document.glue_s3_access.json
+}
+
+resource "aws_iam_role_policy_attachment" "glue_s3_access" {
+  role       = aws_iam_role.glue_exec.name
+  policy_arn = aws_iam_policy.glue_s3_access.arn
+}
+
+resource "aws_glue_job" "gold_transform" {
+  name         = "${var.project_name}-${var.environment}-gold-transform"
+  role_arn     = aws_iam_role.glue_exec.arn
+  glue_version = "3.0"
+  max_capacity = 1
+  timeout      = 10
+
+  command {
+    name            = "pythonshell"
+    python_version  = "3.9"
+    script_location = "s3://${aws_s3_bucket.gdp_data.bucket}/${aws_s3_object.glue_script.key}"
+  }
+
+  default_arguments = {
+    "--GOLD_BUCKET"         = aws_s3_bucket.gold_data.bucket
+    "--library-set"         = "analytics"
+    "--job-bookmark-option" = "job-bookmark-disable"
+  }
+
+  tags = var.tags
 }
 
 # ---------------------------------------------------------------------------
@@ -156,6 +276,7 @@ resource "aws_lambda_function" "gdp_ingest" {
   environment {
     variables = {
       S3_BUCKET_NAME = aws_s3_bucket.gdp_data.bucket
+      GLUE_JOB_NAME  = aws_glue_job.gold_transform.name
       LOG_LEVEL      = "INFO"
     }
   }
