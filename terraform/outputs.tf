@@ -42,3 +42,13 @@ output "glue_job_name" {
   description = "Name of the Glue job that produces the gold dataset."
   value       = aws_glue_job.gold_transform.name
 }
+
+output "dynamodb_table_name" {
+  description = "Name of the DynamoDB table storing the gold (2-year average) dataset."
+  value       = aws_dynamodb_table.gold.name
+}
+
+output "dynamodb_table_arn" {
+  description = "ARN of the DynamoDB table storing the gold (2-year average) dataset."
+  value       = aws_dynamodb_table.gold.arn
+}

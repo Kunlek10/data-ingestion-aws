@@ -1,11 +1,13 @@
 """
 AWS Glue Python Shell job. Reads the per-year cleaned GDP CSV produced by the
 ingestion Lambda, aggregates GDP_USD into 2-year period averages per country,
-and writes the result as a CSV to the gold S3 bucket.
+writes the result as a CSV to the gold S3 bucket, and upserts the same rows
+into the DynamoDB gold table for querying/dashboarding.
 """
 
 import io
 import sys
+from decimal import Decimal
 
 import boto3
 import pandas as pd
@@ -13,10 +15,11 @@ from awsglue.utils import getResolvedOptions
 
 args = getResolvedOptions(
     sys.argv,
-    ["SOURCE_BUCKET", "SOURCE_KEY", "GOLD_BUCKET"],
+    ["SOURCE_BUCKET", "SOURCE_KEY", "GOLD_BUCKET", "DYNAMODB_TABLE"],
 )
 
 s3_client = boto3.client("s3")
+dynamodb_resource = boto3.resource("dynamodb")
 
 
 def load_source_csv(bucket: str, key: str) -> pd.DataFrame:
@@ -54,12 +57,31 @@ def upload_csv(df: pd.DataFrame, bucket: str, key: str) -> None:
     s3_client.put_object(Bucket=bucket, Key=key, Body=buffer.getvalue(), ContentType="text/csv")
 
 
+def upsert_gold_rows(df: pd.DataFrame, table_name: str) -> None:
+    """Write each gold row to DynamoDB, overwriting the average if the same
+    country/period pair was already loaded by an earlier run (put_item on
+    the same primary key is an overwrite, not an append)."""
+    table = dynamodb_resource.Table(table_name)
+    with table.batch_writer(overwrite_by_pkeys=["country_code", "period"]) as batch:
+        for row in df.itertuples():
+            batch.put_item(
+                Item={
+                    "country_code": row.Country_Code,
+                    "period": row.Period,
+                    # DynamoDB's boto3 resource requires Decimal for numbers;
+                    # round-tripping through str avoids float precision noise.
+                    "avg_gdp_usd": Decimal(str(row.Avg_GDP_USD)),
+                }
+            )
+
+
 def main() -> None:
     # SOURCE_BUCKET/SOURCE_KEY are passed per-run by the Lambda (start_job_run);
-    # GOLD_BUCKET is a fixed default argument baked into the Glue job itself.
+    # GOLD_BUCKET/DYNAMODB_TABLE are fixed default arguments on the Glue job.
     source_bucket = args["SOURCE_BUCKET"]
     source_key = args["SOURCE_KEY"]
     gold_bucket = args["GOLD_BUCKET"]
+    dynamodb_table = args["DYNAMODB_TABLE"]
 
     print(f"Reading s3://{source_bucket}/{source_key}")
     raw_df = load_source_csv(source_bucket, source_key)
@@ -73,6 +95,9 @@ def main() -> None:
 
     print(f"Writing {len(gold_df)} rows to s3://{gold_bucket}/{gold_key}")
     upload_csv(gold_df, gold_bucket, gold_key)
+
+    print(f"Upserting {len(gold_df)} rows into DynamoDB table {dynamodb_table}")
+    upsert_gold_rows(gold_df, dynamodb_table)
 
 
 if __name__ == "__main__":

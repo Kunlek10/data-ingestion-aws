@@ -93,6 +93,29 @@ resource "aws_s3_bucket_public_access_block" "gold_data" {
 }
 
 # ---------------------------------------------------------------------------
+# DynamoDB table — queryable store for the gold dataset (2-year GDP averages).
+# On-demand billing: no continuous baseline cost, unlike Aurora.
+# ---------------------------------------------------------------------------
+resource "aws_dynamodb_table" "gold" {
+  name         = "${var.project_name}-${var.environment}-gdp-gold"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "country_code"
+  range_key    = "period"
+
+  attribute {
+    name = "country_code"
+    type = "S"
+  }
+
+  attribute {
+    name = "period"
+    type = "S"
+  }
+
+  tags = var.tags
+}
+
+# ---------------------------------------------------------------------------
 # IAM role + least-privilege policy for the Lambda function
 # ---------------------------------------------------------------------------
 data "aws_iam_policy_document" "lambda_assume_role" {
@@ -205,6 +228,24 @@ resource "aws_iam_role_policy_attachment" "glue_s3_access" {
   policy_arn = aws_iam_policy.glue_s3_access.arn
 }
 
+data "aws_iam_policy_document" "glue_dynamodb_access" {
+  statement {
+    sid       = "AllowWriteGoldTable"
+    actions   = ["dynamodb:PutItem", "dynamodb:BatchWriteItem", "dynamodb:DescribeTable"]
+    resources = [aws_dynamodb_table.gold.arn]
+  }
+}
+
+resource "aws_iam_policy" "glue_dynamodb_access" {
+  name   = "${var.project_name}-${var.environment}-glue-dynamodb-policy"
+  policy = data.aws_iam_policy_document.glue_dynamodb_access.json
+}
+
+resource "aws_iam_role_policy_attachment" "glue_dynamodb_access" {
+  role       = aws_iam_role.glue_exec.name
+  policy_arn = aws_iam_policy.glue_dynamodb_access.arn
+}
+
 resource "aws_glue_job" "gold_transform" {
   name         = "${var.project_name}-${var.environment}-gold-transform"
   role_arn     = aws_iam_role.glue_exec.arn
@@ -220,6 +261,7 @@ resource "aws_glue_job" "gold_transform" {
 
   default_arguments = {
     "--GOLD_BUCKET"         = aws_s3_bucket.gold_data.bucket
+    "--DYNAMODB_TABLE"      = aws_dynamodb_table.gold.name
     "--library-set"         = "analytics"
     "--job-bookmark-option" = "job-bookmark-disable"
   }
