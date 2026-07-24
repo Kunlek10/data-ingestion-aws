@@ -99,16 +99,10 @@ resource "aws_s3_bucket_public_access_block" "gold_data" {
 resource "aws_dynamodb_table" "gold" {
   name         = "${var.project_name}-${var.environment}-gdp-gold"
   billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "country_code"
-  range_key    = "period"
+  hash_key     = "country_year"
 
   attribute {
-    name = "country_code"
-    type = "S"
-  }
-
-  attribute {
-    name = "period"
+    name = "country_year"
     type = "S"
   }
 

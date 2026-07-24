@@ -60,12 +60,19 @@ def upload_csv(df: pd.DataFrame, bucket: str, key: str) -> None:
 def upsert_gold_rows(df: pd.DataFrame, table_name: str) -> None:
     """Write each gold row to DynamoDB, overwriting the average if the same
     country/period pair was already loaded by an earlier run (put_item on
-    the same primary key is an overwrite, not an append)."""
+    the same primary key is an overwrite, not an append).
+
+    The table uses a single combined partition key, country_year (e.g.
+    "USA_2016-2017"), rather than a composite hash+range key; country_code
+    and period are kept as plain attributes so they're still readable/
+    filterable without parsing the key.
+    """
     table = dynamodb_resource.Table(table_name)
-    with table.batch_writer(overwrite_by_pkeys=["country_code", "period"]) as batch:
+    with table.batch_writer(overwrite_by_pkeys=["country_year"]) as batch:
         for row in df.itertuples():
             batch.put_item(
                 Item={
+                    "country_year": f"{row.Country_Code}_{row.Period}",
                     "country_code": row.Country_Code,
                     "period": row.Period,
                     # DynamoDB's boto3 resource requires Decimal for numbers;
